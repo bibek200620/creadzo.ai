@@ -4,6 +4,7 @@ import { useState, useEffect } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import Navbar from "@/components/Navbar";
+import { backendRequest, clearAuthSession, getToken, updateStoredUser, type BackendUser } from "@/lib/backendClient";
 
 interface UserProfile {
     name: string;
@@ -18,47 +19,122 @@ interface UserProfile {
     monthlyIncome: number;
 }
 
+function parseUserProfile(input: unknown): UserProfile | null {
+    if (!input || typeof input !== "object") return null;
+    const data = input as Record<string, unknown>;
+
+    if (typeof data.name !== "string" || typeof data.email !== "string") {
+        return null;
+    }
+
+    return {
+        name: data.name,
+        email: data.email,
+        phone: typeof data.phone === "string" ? data.phone : "",
+        dob: typeof data.dob === "string" ? data.dob : "",
+        currentAddress: typeof data.currentAddress === "string" ? data.currentAddress : "",
+        permanentAddress: typeof data.permanentAddress === "string" ? data.permanentAddress : "",
+        pan: typeof data.pan === "string" ? data.pan : "",
+        aadhaar: typeof data.aadhaar === "string" ? data.aadhaar : "",
+        employmentType: typeof data.employmentType === "string" ? data.employmentType : "",
+        monthlyIncome: typeof data.monthlyIncome === "number" ? data.monthlyIncome : 0,
+    };
+}
+
 export default function ProfilePage() {
     const [user, setUser] = useState<UserProfile | null>(null);
     const [stats, setStats] = useState<{ trustScore: number; creditLimit: number } | null>(null);
     const [isEditing, setIsEditing] = useState(false);
     const [formData, setFormData] = useState<UserProfile | null>(null);
+    const [error, setError] = useState("");
     const router = useRouter();
 
     useEffect(() => {
-        // Load User
-        const storedUser = localStorage.getItem("credzoUser");
-        if (storedUser) {
-            const parsed = JSON.parse(storedUser);
-            setUser(parsed);
-            setFormData(parsed);
-        } else {
+        const token = getToken();
+        if (!token) {
             router.push("/onboarding/sign-in");
+            return;
         }
 
-        // Load Stats
-        const storedAnalysis = localStorage.getItem("credzoAnalysis");
-        if (storedAnalysis) {
+        let cancelled = false;
+
+        const loadProfile = async () => {
             try {
-                const parsed = JSON.parse(storedAnalysis);
-                setStats({
-                    trustScore: parsed.trustScore || 0,
-                    creditLimit: parsed.creditLimit || 0
-                });
-            } catch { /* ignore */ }
-        }
+                const profileResponse = await backendRequest<{ user: UserProfile }>("/auth/me");
+                if (cancelled) return;
+
+                const parsedUser = parseUserProfile(profileResponse.user);
+                if (!parsedUser) {
+                    throw new Error("Invalid user profile received");
+                }
+
+                setUser(parsedUser);
+                setFormData(parsedUser);
+                updateStoredUser(profileResponse.user as unknown as BackendUser);
+                setError("");
+
+                try {
+                    const analysisResponse = await backendRequest<{ record: { summary: { trustScore: number; approvedLimit: number } } }>("/analysis/latest");
+                    if (cancelled) return;
+                    setStats({
+                        trustScore: Number(analysisResponse.record?.summary?.trustScore || 0),
+                        creditLimit: Number(analysisResponse.record?.summary?.approvedLimit || 0),
+                    });
+                } catch {
+                    setStats(null);
+                }
+            } catch {
+                clearAuthSession();
+                router.push("/onboarding/sign-in");
+            }
+        };
+
+        loadProfile();
+
+        return () => {
+            cancelled = true;
+        };
     }, [router]);
 
     const handleLogout = () => {
-        localStorage.removeItem("credzoUser");
+        clearAuthSession();
         router.push("/onboarding/sign-in");
     };
 
-    const handleSave = () => {
+    const handleSave = async () => {
         if (!formData) return;
-        localStorage.setItem("credzoUser", JSON.stringify(formData));
-        setUser(formData);
-        setIsEditing(false);
+
+        try {
+            const response = await backendRequest<{ user: UserProfile }>("/auth/me", {
+                method: "PUT",
+                body: {
+                    name: formData.name,
+                    email: formData.email,
+                    phone: formData.phone,
+                    dob: formData.dob,
+                    currentAddress: formData.currentAddress,
+                    permanentAddress: formData.permanentAddress,
+                    pan: formData.pan,
+                    aadhaar: formData.aadhaar,
+                    employmentType: formData.employmentType,
+                    monthlyIncome: formData.monthlyIncome,
+                },
+            });
+
+            const parsedUser = parseUserProfile(response.user);
+            if (!parsedUser) {
+                throw new Error("Invalid profile response");
+            }
+
+            updateStoredUser(response.user as unknown as BackendUser);
+            setUser(parsedUser);
+            setFormData(parsedUser);
+            setIsEditing(false);
+            setError("");
+        } catch (saveError) {
+            const message = saveError instanceof Error ? saveError.message : "Failed to update profile";
+            setError(message);
+        }
     };
 
     if (!user || !formData) return null;
@@ -97,6 +173,12 @@ export default function ProfilePage() {
                         </div>
                     )}
                 </div>
+
+                {error ? (
+                    <p className="mb-4 rounded-xl border border-red-200 bg-red-50 px-4 py-2 text-sm text-red-700">
+                        {error}
+                    </p>
+                ) : null}
 
                 <div className="grid lg:grid-cols-3 gap-8">
                     {/* Left & Middle Column: Full Details */}

@@ -1,6 +1,12 @@
 import { GoogleGenerativeAI, Part } from "@google/generative-ai";
 import { NextRequest, NextResponse } from "next/server";
 
+function getErrorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "string") return error;
+  return "Unknown error";
+}
+
 export async function POST(req: NextRequest) {
   try {
     const apiKey = process.env.GEMINI_API_KEY;
@@ -16,8 +22,8 @@ export async function POST(req: NextRequest) {
     const { bankStatement, pdfBase64, fileName } = body;
 
     const genAI = new GoogleGenerativeAI(apiKey);
-    // Switching to 2.0-flash as it is confirmed available
-    const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
+    // Using Gemini 2.5 Flash for faster, low-latency analysis
+    const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
 
     const analysisPrompt = `You are a senior credit analyst AI for Credzo.ai — a fintech platform providing alternative credit scoring for underbanked individuals in India who don't have CIBIL scores.
 
@@ -139,10 +145,10 @@ Return a JSON object with EXACTLY this structure (raw JSON only, no markdown):
     }
 
     return NextResponse.json({ success: true, analysis });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("Analysis error:", error);
 
-    let errorMessage = error.message || "Unknown error";
+    const errorMessage = getErrorMessage(error);
     if (errorMessage.includes("429") || errorMessage.includes("Quota exceeded")) {
       return NextResponse.json(
         { error: "Gemini API Quota Exceeded. Please wait a minute and try again. (Free tier limit reached)" },

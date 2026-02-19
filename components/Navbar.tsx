@@ -16,91 +16,75 @@ export default function Navbar({ showBack = false }: NavbarProps) {
     useEffect(() => {
         setMounted(true);
         const storedUser = localStorage.getItem("credzoUser");
-        if (storedUser) {
-            setUser(JSON.parse(storedUser));
+        if (!storedUser) return;
+
+        try {
+            const parsed = JSON.parse(storedUser);
+            if (parsed && typeof parsed.name === "string") {
+                setUser({ name: parsed.name });
+            }
+        } catch {
+            // Ignore corrupted localStorage data
         }
     }, []);
 
-    // Get initials
     const initials = user?.name
         ? user.name.split(" ").map((n) => n[0]).join("").toUpperCase().slice(0, 2)
         : "UN";
+    const firstName = user?.name ? user.name.split(" ")[0] : "";
 
     return (
-        <nav className="bg-white/80 backdrop-blur-lg border-b border-stone-200/60 px-6 py-4 flex justify-between items-center sticky top-0 z-20">
-            <div className="flex items-center gap-4">
-                {showBack && (
-                    <button
-                        onClick={() => router.push("/")}
-                        className="text-stone-400 hover:text-teal-700 transition-colors"
-                    >
-                        <svg
-                            xmlns="http://www.w3.org/2000/svg"
-                            fill="none"
-                            viewBox="0 0 24 24"
-                            strokeWidth={2}
-                            stroke="currentColor"
-                            className="w-5 h-5"
+        <nav className="sticky top-0 z-30 px-4 pt-4">
+            <div className="mx-auto flex w-full max-w-6xl items-center justify-between rounded-2xl border border-white/70 bg-white/75 px-4 py-3 shadow-[0_14px_40px_rgba(15,23,42,0.08)] backdrop-blur-xl md:px-5">
+                <div className="flex items-center gap-3">
+                    {showBack && (
+                        <button
+                            onClick={() => router.push("/")}
+                            className="inline-flex h-10 w-10 items-center justify-center rounded-xl border border-slate-200 bg-white text-slate-500 hover:border-teal-200 hover:text-teal-700"
+                            aria-label="Go back"
                         >
-                            <path
-                                strokeLinecap="round"
-                                strokeLinejoin="round"
-                                d="M10.5 19.5L3 12m0 0l7.5-7.5M3 12h18"
-                            />
-                        </svg>
-                    </button>
-                )}
-                <Link href="/" className="flex items-center gap-2.5">
-                    <div className="bg-teal-700 text-white p-1.5 rounded-lg">
-                        <svg
-                            xmlns="http://www.w3.org/2000/svg"
-                            fill="none"
-                            viewBox="0 0 24 24"
-                            strokeWidth={2}
-                            stroke="currentColor"
-                            className="w-5 h-5"
-                        >
-                            <path
-                                strokeLinecap="round"
-                                strokeLinejoin="round"
-                                d="M3.75 3v11.25A2.25 2.25 0 006 16.5h2.25M3.75 3h-1.5m1.5 0h16.5m0 0h1.5m-1.5 0v11.25A2.25 2.25 0 0118 16.5h-2.25m-7.5 0h7.5m-7.5 0l-1 3m8.5-3l1 3m0 0l.5 1.5m-.5-1.5h-9.5m0 0l-.5 1.5M9 11.25v1.5M12 9v3.75m3-6v6"
-                            />
-                        </svg>
-                    </div>
-                    <h1 className="text-xl font-bold text-stone-800 tracking-wide">
-                        CREDZO<span className="text-stone-400 font-medium">.ai</span>
-                    </h1>
-                </Link>
-            </div>
+                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="h-4 w-4">
+                                <path strokeLinecap="round" strokeLinejoin="round" d="M10.5 19.5L3 12m0 0l7.5-7.5M3 12h18" />
+                            </svg>
+                        </button>
+                    )}
 
-            {mounted && (
-                user ? (
-                    <Link href="/profile" className="flex items-center gap-3 hover:bg-stone-50 p-2 rounded-xl transition cursor-pointer">
-                        <div className="text-right hidden md:block">
-                            <p className="text-sm font-semibold text-stone-700">{user.name}</p>
-                            <p className="text-xs text-stone-400">View Profile</p>
+                    <Link href="/" className="group flex items-center gap-2.5">
+                        <div className="grid h-10 w-10 place-items-center rounded-xl bg-gradient-to-br from-teal-700 to-teal-500 text-white shadow-[0_8px_16px_rgba(15,118,110,0.35)]">
+                            <span className="text-sm font-extrabold">CZ</span>
                         </div>
-                        <div className="bg-teal-50 text-teal-700 font-bold w-10 h-10 rounded-full flex items-center justify-center border-2 border-teal-100">
-                            {initials}
+                        <div>
+                            <p className="text-lg font-bold text-slate-900 leading-tight">Credzo</p>
+                            <p className="text-[11px] uppercase tracking-[0.2em] text-slate-500">Trust Engine</p>
                         </div>
                     </Link>
+                </div>
+
+                {mounted ? (
+                    user ? (
+                        <Link href="/profile" className="flex items-center gap-3 rounded-xl border border-slate-200 bg-white px-2 py-1.5 hover:border-teal-200 hover:bg-teal-50/50">
+                            <div className="hidden text-right sm:block">
+                                <p className="text-sm font-semibold text-slate-800">{firstName}</p>
+                                <p className="text-xs text-slate-500">Profile</p>
+                            </div>
+                            <div className="grid h-10 w-10 place-items-center rounded-xl border border-teal-100 bg-teal-50 font-bold text-teal-700">
+                                {initials}
+                            </div>
+                        </Link>
+                    ) : (
+                        <div className="flex items-center gap-2">
+                            <Link href="/onboarding/sign-in" className="btn-secondary text-sm px-3 py-2">
+                                Log In
+                            </Link>
+                            <Link href="/onboarding/sign-up" className="btn-primary text-sm px-3 py-2">
+                                Create Account
+                            </Link>
+                        </div>
+                    )
                 ) : (
-                    <div className="flex items-center gap-3">
-                        <Link
-                            href="/onboarding/sign-in"
-                            className="text-sm font-semibold text-stone-600 hover:text-teal-700 transition"
-                        >
-                            Log In
-                        </Link>
-                        <Link
-                            href="/onboarding/sign-up"
-                            className="bg-teal-700 hover:bg-teal-800 text-white text-sm font-bold px-4 py-2 rounded-lg transition shadow-lg shadow-teal-700/20"
-                        >
-                            Join Now
-                        </Link>
-                    </div>
-                )
-            )}
+                    <div className="h-10 w-28 animate-pulse rounded-xl bg-slate-200/70" />
+                )}
+            </div>
         </nav>
     );
 }

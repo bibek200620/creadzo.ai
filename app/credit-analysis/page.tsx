@@ -3,6 +3,7 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import Link from "next/link";
 import Navbar from "@/components/Navbar";
+import { backendRequest, getToken } from "@/lib/backendClient";
 
 /* ───────── Type Definitions ───────── */
 
@@ -117,6 +118,54 @@ interface FullAnalysis {
     scorePercentile: number;
 }
 
+const FULL_ANALYSIS_STORAGE_KEY = "credzoAnalysisFull";
+const ANALYSIS_RETENTION_DAYS = 15;
+const DAY_MS = 24 * 60 * 60 * 1000;
+const ANALYSIS_RETENTION_MS = ANALYSIS_RETENTION_DAYS * DAY_MS;
+
+interface StoredFullAnalysis {
+    analysis: FullAnalysis;
+    analyzedAt: number;
+    expiresAt: number;
+}
+
+function parseSummaryTimestamp(raw: string | null): number | null {
+    if (!raw) return null;
+    try {
+        const parsed = JSON.parse(raw) as Record<string, unknown>;
+        return typeof parsed?.timestamp === "number" ? parsed.timestamp : null;
+    } catch {
+        return null;
+    }
+}
+
+function parseStoredFullAnalysis(raw: string | null): StoredFullAnalysis | null {
+    if (!raw) return null;
+    try {
+        const parsed = JSON.parse(raw) as Record<string, unknown>;
+        const analyzedAt = typeof parsed?.analyzedAt === "number" ? parsed.analyzedAt : null;
+        const expiresAt = typeof parsed?.expiresAt === "number" ? parsed.expiresAt : null;
+        const analysis = parsed?.analysis;
+
+        if (!analyzedAt || !expiresAt || !analysis || typeof analysis !== "object") {
+            return null;
+        }
+
+        const analysisRecord = analysis as Record<string, unknown>;
+        if (!analysisRecord.scoreOverview || !analysisRecord.creditLimitBreakdown) {
+            return null;
+        }
+
+        return {
+            analysis: analysis as FullAnalysis,
+            analyzedAt,
+            expiresAt,
+        };
+    } catch {
+        return null;
+    }
+}
+
 /* ───────── Component ───────── */
 
 export default function CreditAnalysisPage() {
@@ -124,23 +173,93 @@ export default function CreditAnalysisPage() {
     const [isAnalyzing, setIsAnalyzing] = useState(false);
     const [error, setError] = useState("");
     const [uploadedFile, setUploadedFile] = useState<File | null>(null);
-    const [bankStatementText, setBankStatementText] = useState("");
     const [dragActive, setDragActive] = useState(false);
+    const [analysisGeneratedAt, setAnalysisGeneratedAt] = useState<number | null>(null);
+    const [analysisLockedUntil, setAnalysisLockedUntil] = useState<number | null>(null);
+    const [hasLockedSummaryOnly, setHasLockedSummaryOnly] = useState(false);
     const fileInputRef = useRef<HTMLInputElement>(null);
 
-    /* ── Persist analysis to localStorage ── */
+    /* ── Load existing analysis and lock window ── */
     useEffect(() => {
-        if (analysis) {
-            localStorage.setItem("credzoAnalysis", JSON.stringify({
-                creditLimit: analysis.creditLimitBreakdown?.approvedLimit || analysis.recommendedCreditLimit,
-                trustScore: analysis.scoreOverview.trustScore,
-                trustLevel: analysis.scoreOverview.trustLevel,
-                scorePercentile: analysis.scorePercentile,
-                repaymentCapacity: analysis.creditLimitBreakdown?.repaymentCapacity,
-                timestamp: Date.now(),
-            }));
+        let restoredFromLocal = false;
+        const now = Date.now();
+        const storedFull = parseStoredFullAnalysis(localStorage.getItem(FULL_ANALYSIS_STORAGE_KEY));
+        const summaryTimestamp = parseSummaryTimestamp(localStorage.getItem("credzoAnalysis"));
+
+        const analyzedAt = storedFull?.analyzedAt ?? summaryTimestamp;
+        const expiresAt = storedFull?.expiresAt ?? (analyzedAt ? analyzedAt + ANALYSIS_RETENTION_MS : null);
+
+        if (!analyzedAt || !expiresAt) return;
+
+        if (now >= expiresAt) {
+            localStorage.removeItem(FULL_ANALYSIS_STORAGE_KEY);
+            localStorage.removeItem("credzoAnalysis");
+            return;
         }
-    }, [analysis]);
+
+        setAnalysisGeneratedAt(analyzedAt);
+        setAnalysisLockedUntil(expiresAt);
+
+        if (storedFull?.analysis) {
+            setAnalysis(storedFull.analysis);
+            setHasLockedSummaryOnly(false);
+            restoredFromLocal = true;
+        } else {
+            setHasLockedSummaryOnly(true);
+            restoredFromLocal = true;
+        }
+
+        const token = getToken();
+        if (!token || restoredFromLocal) return;
+
+        const restoreFromBackend = async () => {
+            try {
+                const latest = await backendRequest<{
+                    record: {
+                        analysis: FullAnalysis;
+                        analyzedAt: string;
+                        expiresAt: string;
+                        summary: {
+                            trustScore: number;
+                            trustLevel: string;
+                            scorePercentile: number;
+                            approvedLimit: number;
+                            repaymentCapacity: number;
+                        };
+                    };
+                }>("/analysis/latest");
+
+                if (!latest?.record?.analysis) return;
+
+                const analyzedAtFromBackend = new Date(latest.record.analyzedAt).getTime();
+                const expiresAtFromBackend = new Date(latest.record.expiresAt).getTime();
+
+                setAnalysis(latest.record.analysis);
+                setAnalysisGeneratedAt(analyzedAtFromBackend);
+                setAnalysisLockedUntil(expiresAtFromBackend);
+                setHasLockedSummaryOnly(false);
+
+                localStorage.setItem("credzoAnalysis", JSON.stringify({
+                    creditLimit: latest.record.summary?.approvedLimit || 0,
+                    trustScore: latest.record.summary?.trustScore || 0,
+                    trustLevel: latest.record.summary?.trustLevel || "",
+                    scorePercentile: latest.record.summary?.scorePercentile || 0,
+                    repaymentCapacity: latest.record.summary?.repaymentCapacity || 0,
+                    timestamp: analyzedAtFromBackend,
+                }));
+
+                localStorage.setItem(FULL_ANALYSIS_STORAGE_KEY, JSON.stringify({
+                    analysis: latest.record.analysis,
+                    analyzedAt: analyzedAtFromBackend,
+                    expiresAt: expiresAtFromBackend,
+                }));
+            } catch {
+                // Keep local-only mode if backend restore is unavailable
+            }
+        };
+
+        restoreFromBackend();
+    }, []);
 
     /* ── File handling ── */
     const handleFileSelect = (file: File) => {
@@ -163,7 +282,28 @@ export default function CreditAnalysisPage() {
     };
 
     /* ── Run Analysis ── */
+    const now = Date.now();
+    const canUploadNewStatement = !analysisLockedUntil || now >= analysisLockedUntil;
+    const daysRemaining = analysisLockedUntil && !canUploadNewStatement
+        ? Math.max(1, Math.ceil((analysisLockedUntil - now) / DAY_MS))
+        : 0;
+    const nextUploadDate = analysisLockedUntil
+        ? new Date(analysisLockedUntil).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" })
+        : null;
+    const lastAnalyzedDate = analysisGeneratedAt
+        ? new Date(analysisGeneratedAt).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" })
+        : null;
+
     const runAnalysis = useCallback(async () => {
+        if (!canUploadNewStatement) {
+            setError(`New PDF upload is available on ${nextUploadDate}.`);
+            return;
+        }
+        if (!uploadedFile) {
+            setError("Please upload a bank statement PDF to continue.");
+            return;
+        }
+
         setIsAnalyzing(true);
         setError("");
 
@@ -189,13 +329,50 @@ export default function CreditAnalysisPage() {
                 body: JSON.stringify({
                     pdfBase64,
                     fileName,
-                    bankStatement: !uploadedFile ? bankStatementText || undefined : undefined,
                 }),
             });
 
             const data = await res.json();
             if (data.success) {
                 setAnalysis(data.analysis);
+                setHasLockedSummaryOnly(false);
+
+                const analyzedAt = Date.now();
+                const expiresAt = analyzedAt + ANALYSIS_RETENTION_MS;
+                setAnalysisGeneratedAt(analyzedAt);
+                setAnalysisLockedUntil(expiresAt);
+
+                localStorage.setItem("credzoAnalysis", JSON.stringify({
+                    creditLimit: data.analysis.creditLimitBreakdown?.approvedLimit || data.analysis.recommendedCreditLimit,
+                    trustScore: data.analysis.scoreOverview.trustScore,
+                    trustLevel: data.analysis.scoreOverview.trustLevel,
+                    scorePercentile: data.analysis.scorePercentile,
+                    repaymentCapacity: data.analysis.creditLimitBreakdown?.repaymentCapacity,
+                    timestamp: analyzedAt,
+                }));
+
+                localStorage.setItem(FULL_ANALYSIS_STORAGE_KEY, JSON.stringify({
+                    analysis: data.analysis,
+                    analyzedAt,
+                    expiresAt,
+                }));
+
+                const token = getToken();
+                if (token) {
+                    try {
+                        await backendRequest("/analysis/save", {
+                            method: "POST",
+                            body: {
+                                analysis: data.analysis,
+                                sourceFileName: fileName || uploadedFile.name,
+                            },
+                        });
+                    } catch {
+                        // Analysis remains available in local storage if backend save fails
+                    }
+                }
+
+                setUploadedFile(null);
             } else {
                 setError(data.error || "Analysis failed. Please try again.");
             }
@@ -204,7 +381,7 @@ export default function CreditAnalysisPage() {
         } finally {
             setIsAnalyzing(false);
         }
-    }, [uploadedFile, bankStatementText]);
+    }, [uploadedFile, canUploadNewStatement, nextUploadDate]);
 
     /* ── Score ring offset calculation ── */
     const scoreOffset = analysis
@@ -256,13 +433,42 @@ export default function CreditAnalysisPage() {
             <main className="max-w-5xl mx-auto p-6 mt-6">
                 <div className="mb-8">
                     <h2 className="text-3xl font-bold text-stone-800">Credit Analysis</h2>
-                    <p className="text-stone-500 mt-1">Powered by Google Gemini AI — Upload your bank statement for a complete financial analysis</p>
+                    <p className="text-stone-500 mt-1">Simple, first-time friendly report from your bank statement.</p>
                 </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+                    <div className="bg-white rounded-2xl border border-stone-200/70 p-4">
+                        <p className="text-[10px] uppercase tracking-widest text-stone-400 font-bold">Step 1</p>
+                        <h3 className="text-sm font-semibold text-stone-800 mt-1">Upload your PDF</h3>
+                        <p className="text-xs text-stone-500 mt-1">One clean bank statement (max 20MB).</p>
+                    </div>
+                    <div className="bg-white rounded-2xl border border-stone-200/70 p-4">
+                        <p className="text-[10px] uppercase tracking-widest text-stone-400 font-bold">Step 2</p>
+                        <h3 className="text-sm font-semibold text-stone-800 mt-1">AI reads transactions</h3>
+                        <p className="text-xs text-stone-500 mt-1">Income, spending, consistency, and risk signals.</p>
+                    </div>
+                    <div className="bg-white rounded-2xl border border-stone-200/70 p-4">
+                        <p className="text-[10px] uppercase tracking-widest text-stone-400 font-bold">Step 3</p>
+                        <h3 className="text-sm font-semibold text-stone-800 mt-1">Get Trust Score + limit</h3>
+                        <p className="text-xs text-stone-500 mt-1">Saved for 15 days before next upload window.</p>
+                    </div>
+                </div>
+
+                {!canUploadNewStatement && (
+                    <div className="mb-6 bg-amber-50 border border-amber-200 rounded-2xl p-4">
+                        <p className="text-sm font-semibold text-amber-900">
+                            Analysis locked for {daysRemaining} day{daysRemaining === 1 ? "" : "s"}.
+                        </p>
+                        <p className="text-xs text-amber-800 mt-1">
+                            Last analyzed: {lastAnalyzedDate || "--"} | Next PDF upload: {nextUploadDate}
+                        </p>
+                    </div>
+                )}
 
                 {/* ═══════════════════════════════════
             UPLOAD SECTION
         ═══════════════════════════════════ */}
-                {!analysis && !isAnalyzing && (
+                {!analysis && !isAnalyzing && canUploadNewStatement && (
                     <div className="space-y-6">
                         {/* PDF Upload */}
                         <div
@@ -315,27 +521,6 @@ export default function CreditAnalysisPage() {
                             </div>
                         </div>
 
-                        {/* Divider */}
-                        <div className="flex items-center gap-4">
-                            <div className="flex-1 h-px bg-stone-200" />
-                            <span className="text-sm text-stone-400 font-medium">OR</span>
-                            <div className="flex-1 h-px bg-stone-200" />
-                        </div>
-
-                        {/* Text Input Fallback */}
-                        <div className="bg-white rounded-2xl p-6 border border-stone-200/60 shadow-sm">
-                            <p className="text-sm font-medium text-stone-700 mb-3">
-                                Describe your financial activity (for demo / no PDF):
-                            </p>
-                            <textarea
-                                rows={4}
-                                value={bankStatementText}
-                                onChange={(e) => setBankStatementText(e.target.value)}
-                                placeholder="E.g.: Monthly income ₹18,000 from gig work (Swiggy). Regular UPI payments for electricity ₹850, phone ₹299. Grocery spending ₹3,500/month. End-of-month balance averages ₹1,200. No bounced transactions..."
-                                className="w-full px-4 py-3 border border-stone-200 rounded-xl focus:ring-2 focus:ring-teal-500/20 focus:border-teal-500 outline-none bg-stone-50/50 text-sm"
-                            />
-                        </div>
-
                         {error && (
                             <div className="bg-red-50 border border-red-200 text-red-700 p-4 rounded-xl text-sm">
                                 {error}
@@ -345,14 +530,28 @@ export default function CreditAnalysisPage() {
                         {/* Analyze Button */}
                         <button
                             onClick={runAnalysis}
-                            disabled={!uploadedFile && !bankStatementText}
+                            disabled={!uploadedFile}
                             className="w-full bg-teal-700 text-white font-bold py-4 rounded-2xl hover:bg-teal-800 transition-all shadow-lg shadow-teal-700/20 disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-3 text-lg"
                         >
                             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-6 h-6">
                                 <path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09zM18.259 8.715L18 9.75l-.259-1.035a3.375 3.375 0 00-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 002.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 002.455 2.456L21.75 6l-1.036.259a3.375 3.375 0 00-2.455 2.456z" />
                             </svg>
-                            Analyze with Gemini AI
+                            Analyze PDF with Gemini AI
                         </button>
+                    </div>
+                )}
+
+                {!analysis && !isAnalyzing && !canUploadNewStatement && (
+                    <div className="bg-white rounded-3xl p-8 border border-stone-200/70 shadow-sm">
+                        <h3 className="text-xl font-bold text-stone-800 mb-2">Your analysis is currently active</h3>
+                        <p className="text-sm text-stone-500">
+                            New PDF upload will be available on <span className="font-semibold text-stone-700">{nextUploadDate}</span>.
+                        </p>
+                        {hasLockedSummaryOnly && (
+                            <p className="text-xs text-stone-500 mt-3">
+                                We found a recent analysis timestamp but not the full details in this browser storage.
+                            </p>
+                        )}
                     </div>
                 )}
 
@@ -380,17 +579,25 @@ export default function CreditAnalysisPage() {
         ═══════════════════════════════════ */}
                 {analysis && (
                     <>
-                        {/* Re-analyze button */}
-                        <div className="flex justify-end mb-6">
-                            <button
-                                onClick={() => { setAnalysis(null); setUploadedFile(null); setBankStatementText(""); }}
-                                className="bg-stone-100 hover:bg-stone-200 text-stone-600 font-medium px-4 py-2 rounded-xl transition text-sm flex items-center gap-2"
-                            >
-                                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-4 h-4">
-                                    <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182" />
-                                </svg>
-                                New Analysis
-                            </button>
+                        <div className="mb-6">
+                            {canUploadNewStatement ? (
+                                <div className="flex justify-end">
+                                    <button
+                                        onClick={() => { setAnalysis(null); setUploadedFile(null); setError(""); }}
+                                        className="bg-stone-100 hover:bg-stone-200 text-stone-700 font-medium px-4 py-2 rounded-xl transition text-sm flex items-center gap-2"
+                                    >
+                                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-4 h-4">
+                                            <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182" />
+                                        </svg>
+                                        Upload New Statement
+                                    </button>
+                                </div>
+                            ) : (
+                                <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4">
+                                    <p className="text-sm font-semibold text-amber-900">This analysis stays locked for 15 days.</p>
+                                    <p className="text-xs text-amber-800 mt-1">Next upload available on {nextUploadDate}.</p>
+                                </div>
+                            )}
                         </div>
 
                         {/* ═══════════════════════════════════
@@ -493,11 +700,11 @@ export default function CreditAnalysisPage() {
                             </div>
                         </div>
 
-                        <div className="bg-white rounded-3xl p-8 mb-6 shadow-sm border border-stone-200/60">
-                            <div className="flex flex-col lg:flex-row items-center gap-8">
+                        <div className="bg-white rounded-3xl p-6 md:p-8 mb-6 shadow-sm border border-stone-200/60">
+                            <div className="flex flex-col lg:flex-row items-center lg:items-start gap-8 md:gap-10">
                                 {/* Score Ring */}
-                                <div className="relative flex items-center justify-center shrink-0">
-                                    <svg className="w-48 h-48 transform -rotate-90">
+                                <div className="relative grid place-items-center shrink-0 w-44 h-44 sm:w-48 sm:h-48">
+                                    <svg className="w-full h-full transform -rotate-90" viewBox="0 0 192 192" aria-hidden="true">
                                         <circle className="text-stone-100" strokeWidth="14" stroke="currentColor" fill="transparent" r="54" cx="96" cy="96" />
                                         <circle
                                             className="text-teal-500"
@@ -513,15 +720,17 @@ export default function CreditAnalysisPage() {
                                             style={{ transition: "stroke-dashoffset 1.5s ease" }}
                                         />
                                     </svg>
-                                    <div className="absolute flex flex-col items-center">
-                                        <span className="text-5xl font-bold text-stone-800">{analysis.scoreOverview.trustScore}</span>
-                                        <span className="text-[10px] font-bold text-teal-600 tracking-widest mt-1">{analysis.scoreOverview.trustLevel}</span>
+                                    <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center px-4 text-center">
+                                        <span className="text-4xl sm:text-5xl font-bold leading-none text-stone-800">{analysis.scoreOverview.trustScore}</span>
+                                        <span className="mt-1 max-w-[120px] text-[9px] sm:text-[11px] font-bold uppercase leading-tight tracking-[0.12em] text-teal-600 break-words">
+                                            {analysis.scoreOverview.trustLevel}
+                                        </span>
                                     </div>
                                 </div>
 
                                 {/* Score Details */}
-                                <div className="flex-1 text-center lg:text-left">
-                                    <h3 className="text-2xl font-bold text-stone-800 mb-3">Your Credzo Trust Score</h3>
+                                <div className="flex-1 min-w-0 text-center lg:text-left">
+                                    <h3 className="text-xl sm:text-2xl font-bold text-stone-800 mb-3 leading-tight">Your Credzo Trust Score</h3>
                                     <p className="text-stone-500 text-sm mb-6 leading-relaxed">{analysis.scoreOverview.scoreExplanation}</p>
 
                                     {/* Score Breakdown Bars */}
@@ -546,7 +755,7 @@ export default function CreditAnalysisPage() {
                             </div>
 
                             {/* Bottom stats */}
-                            <div className="grid grid-cols-2 gap-4 mt-8 pt-6 border-t border-stone-100">
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mt-8 pt-6 border-t border-stone-100">
                                 <div className="bg-teal-50 rounded-xl p-4 border border-teal-100">
                                     <p className="text-xs text-stone-400 uppercase font-medium">Recommended Credit Limit</p>
                                     <p className="text-xl font-bold text-teal-700 mt-1">₹{analysis.recommendedCreditLimit.toLocaleString()}</p>
@@ -716,6 +925,24 @@ export default function CreditAnalysisPage() {
                 SECTION E: TRUST FACTOR ANALYSIS
             ═══════════════════════════════════ */}
                         <div className="space-y-6">
+                            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                                <div className="bg-white rounded-2xl p-4 border border-teal-100/80">
+                                    <p className="text-[11px] uppercase tracking-wide text-stone-400 font-semibold">Positive Signals</p>
+                                    <p className="text-2xl font-bold text-teal-700 mt-1">{analysis.trustFactorAnalysis.positiveSignals.length}</p>
+                                    <p className="text-xs text-stone-500 mt-1">Strong trust indicators found</p>
+                                </div>
+                                <div className="bg-white rounded-2xl p-4 border border-amber-100/80">
+                                    <p className="text-[11px] uppercase tracking-wide text-stone-400 font-semibold">Missing Signals</p>
+                                    <p className="text-2xl font-bold text-amber-700 mt-1">{analysis.trustFactorAnalysis.missingSignals.length}</p>
+                                    <p className="text-xs text-stone-500 mt-1">Areas to improve for next score</p>
+                                </div>
+                                <div className="bg-white rounded-2xl p-4 border border-violet-100/80">
+                                    <p className="text-[11px] uppercase tracking-wide text-stone-400 font-semibold">Risk Factors</p>
+                                    <p className="text-2xl font-bold text-violet-700 mt-1">{analysis.trustFactorAnalysis.riskFactors.length}</p>
+                                    <p className="text-xs text-stone-500 mt-1">Items reviewed by the model</p>
+                                </div>
+                            </div>
+
                             {/* Positive Signals */}
                             <div className="bg-white rounded-2xl p-6 shadow-sm border border-stone-200/60">
                                 <h3 className="text-lg font-bold text-stone-800 mb-4 flex items-center gap-2">
