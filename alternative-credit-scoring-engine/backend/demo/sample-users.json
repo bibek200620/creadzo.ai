@@ -1,0 +1,23 @@
+[
+  {
+    "name": "Asha Kumari",
+    "email": "asha.gig@example.com",
+    "phone": "9001002001",
+    "password": "Asha@1234",
+    "statementFile": "gig_worker.csv"
+  },
+  {
+    "name": "Ravi Naik",
+    "email": "ravi.salary@example.com",
+    "phone": "9001002002",
+    "password": "Ravi@1234",
+    "statementFile": "salaried_emi.csv"
+  },
+  {
+    "name": "Imran Sheikh",
+    "email": "imran.unstable@example.com",
+    "phone": "9001002003",
+    "password": "Imran@1234",
+    "statementFile": "volatile_cashflow.csv"
+  }
+]
